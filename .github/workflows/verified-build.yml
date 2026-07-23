@@ -1,0 +1,107 @@
+name: Verified Build (tag-triggered)
+
+# Fires only on per-program version tags, e.g.:
+#   program-one-v1.0.0
+#   program-two-v0.3.2
+# The tag prefix decides WHICH program is built. Pushing one tag builds one program.
+on:
+  push:
+    tags:
+      - "program-one-v*"
+      - "program-two-v*"
+
+# Never run two mainnet jobs for the same tag at once.
+concurrency:
+  group: verified-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verified-build:
+    runs-on: ubuntu-latest
+
+    # THIS LINE is the approval gate. The job starts, then PAUSES here until a
+    # required reviewer of the `mainnet` environment approves it in the Actions UI.
+    # Nothing below runs until approval. (In real life the build/buffer/proposal
+    # steps live behind this gate; here we only build + log the verifier hash.)
+    environment: mainnet
+
+    steps:
+      - name: Checkout (at the tagged commit)
+        uses: actions/checkout@v4
+
+      - name: Resolve target program from tag
+        id: resolve
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"                 # e.g. program-one-v1.0.0
+          PROGRAM="${TAG%-v*}"                      # program-one
+          VERSION="${TAG##*-v}"                     # 1.0.0
+          LIB="${PROGRAM//-/_}"                     # program_one  (crate/lib name)
+
+          if [ ! -d "programs/${PROGRAM}" ]; then
+            echo "::error::No directory programs/${PROGRAM} for tag ${TAG}"
+            exit 1
+          fi
+
+          echo "tag=$TAG"          >> "$GITHUB_OUTPUT"
+          echo "program=$PROGRAM"  >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
+          echo "lib=$LIB"          >> "$GITHUB_OUTPUT"
+
+          echo "### Verified build request" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Tag:** \`$TAG\`"         >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Program:** \`$PROGRAM\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Version:** \`$VERSION\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ runner.os }}-solana-verify
+
+      - name: Install solana-verify
+        run: |
+          set -euo pipefail
+          if ! command -v solana-verify >/dev/null 2>&1; then
+            cargo install solana-verify --locked
+          fi
+          solana-verify --version
+
+      - name: Verifiable build (${{ steps.resolve.outputs.lib }})
+        run: |
+          set -euo pipefail
+          # Docker-based reproducible build for just the one program.
+          solana-verify build --library-name "${{ steps.resolve.outputs.lib }}"
+
+      - name: Compute & log verifier hash
+        run: |
+          set -euo pipefail
+          SO="target/deploy/${{ steps.resolve.outputs.lib }}.so"
+          if [ ! -f "$SO" ]; then
+            echo "::error::Expected artifact $SO not found"
+            ls -R target/deploy || true
+            exit 1
+          fi
+
+          HASH="$(solana-verify get-executable-hash "$SO")"
+
+          echo "=================================================="
+          echo " PROGRAM        : ${{ steps.resolve.outputs.program }}"
+          echo " VERSION        : ${{ steps.resolve.outputs.version }}"
+          echo " ARTIFACT       : $SO"
+          echo " VERIFIER HASH  : $HASH"
+          echo "=================================================="
+
+          {
+            echo "- **Artifact:** \`$SO\`"
+            echo "- **Verifier hash:** \`$HASH\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # In the real pipeline, the next steps (behind this same gate) would be:
+      #   - solana program write-buffer target/deploy/<lib>.so
+      #   - solana program set-buffer-authority <buffer> --new-buffer-authority <multisig>
+      #   - create the Squads upgrade proposal referencing the buffer
