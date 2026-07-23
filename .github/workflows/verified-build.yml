@@ -10,7 +10,7 @@ on:
       - "program-one-v*"
       - "program-two-v*"
 
-# Never run two mainnet jobs for the same tag at once.
+# Never run two builds for the same tag at once.
 concurrency:
   group: verified-build-${{ github.ref }}
   cancel-in-progress: false
@@ -21,8 +21,10 @@ jobs:
 
     # THIS LINE is the approval gate. The job starts, then PAUSES here until a
     # required reviewer of the `mainnet` environment approves it in the Actions UI.
-    # Nothing below runs until approval. (In real life the build/buffer/proposal
-    # steps live behind this gate; here we only build + log the verifier hash.)
+    # Nothing below runs until approval.
+    # NOTE: GitHub only ENFORCES environment required-reviewers on public repos,
+    # or on private repos under a paid plan (Pro/Team/Enterprise). On a private
+    # Free-plan repo the rule is silently ignored and the job runs immediately.
     environment: mainnet
 
     steps:
@@ -48,12 +50,31 @@ jobs:
           echo "version=$VERSION"  >> "$GITHUB_OUTPUT"
           echo "lib=$LIB"          >> "$GITHUB_OUTPUT"
 
-          echo "### Verified build request" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Build request" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Tag:** \`$TAG\`"         >> "$GITHUB_STEP_SUMMARY"
           echo "- **Program:** \`$PROGRAM\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Version:** \`$VERSION\`" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Cache cargo
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Solana CLI (Agave)
+        run: |
+          set -euo pipefail
+          # Uses current stable platform-tools (edition2024-capable), unlike the
+          # old pinned image in `solana-verify build`. If this ever fails to
+          # compile, pin the exact version you build with locally, e.g.
+          #   https://release.anza.xyz/v2.3.0/install
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Versions
+        run: |
+          set -euo pipefail
+          solana --version
+          cargo-build-sbf --version
+
+      - name: Cache cargo + sbf target
         uses: actions/cache@v4
         with:
           path: |
@@ -61,21 +82,22 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-          key: cargo-${{ runner.os }}-solana-verify
+            target
+          key: sbf-${{ runner.os }}-${{ steps.resolve.outputs.lib }}-${{ hashFiles('Cargo.lock') }}
 
-      - name: Install solana-verify
+      - name: Build program (${{ steps.resolve.outputs.lib }})
+        run: |
+          set -euo pipefail
+          # Build ONLY the tagged program's crate.
+          cargo build-sbf --manifest-path "programs/${{ steps.resolve.outputs.program }}/Cargo.toml"
+
+      - name: Install solana-verify (for hashing only)
         run: |
           set -euo pipefail
           if ! command -v solana-verify >/dev/null 2>&1; then
             cargo install solana-verify --locked
           fi
           solana-verify --version
-
-      - name: Verifiable build (${{ steps.resolve.outputs.lib }})
-        run: |
-          set -euo pipefail
-          # Docker-based reproducible build for just the one program.
-          solana-verify build --library-name "${{ steps.resolve.outputs.lib }}"
 
       - name: Compute & log verifier hash
         run: |
