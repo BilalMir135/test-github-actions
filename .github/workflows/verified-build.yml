@@ -16,6 +16,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # ── JOB 1: no environment, so it runs immediately ──
+  verify-source:
+    runs-on: ubuntu-latest
+    outputs:
+      program: ${{ steps.resolve.outputs.program }}
+      version: ${{ steps.resolve.outputs.version }}
+      lib:     ${{ steps.resolve.outputs.lib }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # required — default depth 1 has no main history
+
+      - name: Verify tag source      # ← the step you asked about
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          ...
+
+      - name: Resolve target program from tag
+        id: resolve
+        run: |
+          ...   # your existing resolve step, moved here
+
+  # ── JOB 2: gated, waits for two approvals ──
   verified-build:
     runs-on: ubuntu-latest
 
@@ -52,6 +76,7 @@ jobs:
 
           echo "### Build request" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Tag:** \`$TAG\`"         >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Commit:** \`$GITHUB_SHA\`"  >> "$GITHUB_STEP_SUMMARY"
           echo "- **Program:** \`$PROGRAM\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- **Version:** \`$VERSION\`" >> "$GITHUB_STEP_SUMMARY"
 
